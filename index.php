@@ -1,50 +1,9 @@
 <?php
-// Конфигурация
-$webhookUrl = 'https://b24-27cw69.bitrix24.ru/rest/1/nrpvb1n6jq9bd2h5/';
-$phoneNumber = '+79999999999'; // Пример номера телефона, можно заменить на получение из другого источника
+require_once 'SendBitrix.php';
 
-/**
- * Функция для отправки запросов к Bitrix24 REST API
- */
-function sendBitrixRequest($method, $params = [])
-{
-    global $webhookUrl;
-
-    $url = $webhookUrl . $method;
-
-    $ch = curl_init();
-    curl_setopt($ch, CURLOPT_URL, $url);
-    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch, CURLOPT_POST, true);
-    curl_setopt($ch, CURLOPT_POSTFIELDS, http_build_query($params));
-    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
-    curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, false);
-
-    $response = curl_exec($ch);
-    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-
-    if (curl_errno($ch)) {
-        echo 'Ошибка cURL: ' . curl_error($ch);
-        curl_close($ch);
-        return false;
-    }
-
-    curl_close($ch);
-
-    if ($httpCode !== 200) {
-        echo "HTTP ошибка: $httpCode\n";
-        return false;
-    }
-
-    $result = json_decode($response, true);
-
-    if (isset($result['error'])) {
-        echo "Ошибка Bitrix24: " . $result['error_description'] . "\n";
-        return false;
-    }
-
-    return $result;
-}
+$data = $_GET;
+file_put_contents('data.json', json_encode($data, JSON_PRETTY_PRINT | FILE_APPEND));
+$phoneNumber = trim($data['phone']); //$data['phone']; 
 
 /**
  * Поиск дубликатов контактов по телефону
@@ -59,7 +18,7 @@ function findDuplicateContacts($phone)
     ];
 
     $result = sendBitrixRequest($method, $params);
-
+    file_put_contents('result.json', json_encode($result, JSON_PRETTY_PRINT));
     if ($result && isset($result['result']['CONTACT'])) {
         return $result['result']['CONTACT'];
     }
@@ -171,17 +130,17 @@ function main()
         }
 
         $assignedById = $contactInfo['ASSIGNED_BY_ID'] ?? null;
-        $ufCrm123 = $contactInfo['UF_CRM_1765802383436'] ?? null;
+        $ufCrm123 = $contactInfo['UF_CRM_1765885674704'] ?? null;
 
         echo "  ASSIGNED_BY_ID: $assignedById\n";
-        echo "  UF_CRM_1765802383436: " . ($ufCrm123 ? $ufCrm123 : 'пусто') . "\n\n";
+        echo "  UF_CRM_1765885674704: " . ($ufCrm123 ? $ufCrm123 : 'пусто') . "\n\n";
 
         $contacts[$contactId] = [
             'ASSIGNED_BY_ID' => $assignedById,
-            'UF_CRM_1765802383436' => $ufCrm123
+            'UF_CRM_1765885674704' => $ufCrm123
         ];
 
-        // Запоминаем контакт с заполненным UF_CRM_1765802383436
+        // Запоминаем контакт с заполненным UF_CRM_1765885674704
         if (!empty($ufCrm123) && $assignedByWithUfCrm === null) {
             $nameContactWithUfCrm = $contactInfo['NAME'];
             $secondNameContactWithUfCrm = $contactInfo['SECOND_NAME'];
@@ -192,21 +151,21 @@ function main()
         }
     }
 
-    // 3. Если найден контакт с заполненным UF_CRM_1765802383436
+    // 3. Если найден контакт с заполненным UF_CRM_1765885674704
     if ($assignedByWithUfCrm !== null) {
-        echo "Найден контакт с заполненным UF_CRM_1765802383436: ID $contactWithUfCrm\n";
+        echo "Найден контакт с заполненным UF_CRM_1765885674704: ID $contactWithUfCrm\n";
         echo "ASSIGNED_BY_ID для обновления: $assignedByWithUfCrm\n\n";
 
-        // 4. Обновляем контакты с пустым UF_CRM_1765802383436
+        // 4. Обновляем контакты с пустым UF_CRM_1765885674704
         $updatedCount = 0;
         foreach ($contacts as $contactId => $contactData) {
-            if (empty($contactData['UF_CRM_1765802383436']) && $contactData['ASSIGNED_BY_ID'] != $assignedByWithUfCrm) {
+            if (empty($contactData['UF_CRM_1765885674704']) && $contactData['ASSIGNED_BY_ID'] != $assignedByWithUfCrm) {
                 echo "Обновляем контакт ID: $contactId\n";
 
                 $updateResult = updateContact($contactId, [
                     'FIELDS' => [
                         'ASSIGNED_BY_ID' => $assignedByWithUfCrm,
-                        'UF_CRM_1765802383436' => $ufCrmcontactWithUfCrm,
+                        'UF_CRM_1765885674704' => $ufCrmcontactWithUfCrm,
                         'NAME' => $nameContactWithUfCrm,
                         'SECOND_NAME' => $secondNameContactWithUfCrm,
                         'LAST_NAME' => $lastNameContactWithUfCrm
@@ -220,17 +179,24 @@ function main()
                     echo "  Ошибка при обновлении контакта\n";
                 }
             }
+            if (!empty($contactData['UF_CRM_1765885674704'])) {
+                $updateResult = updateContact($contactId, [
+                    'FIELDS' => [
+                        'UF_CRM_1765887321474' => 'дубль',
+                    ]
+                ]);
+            }
         }
 
         echo "\nИтого обновлено контактов: $updatedCount\n";
 
         // 5. Объединяем дубликаты
         $mergeResult = mergeContacts($contactIds, $contactWithUfCrm);
-
+        file_put_contents('error.txt', "Ошибка при объединении дубликатов: " . json_encode($mergeResult) . "\n", FILE_APPEND);
         if ($mergeResult['STATUS'] == 'SUCCESS') {
             echo "Дубликаты успешно объединены\n";
         } else {
-            print_r($mergeResult);
+
             print_r($contactWithUfCrm);
         }
     } else {
