@@ -3,60 +3,128 @@ require_once 'SendBitrix.php';
 
 $data = $_GET;
 file_put_contents('data.json', json_encode($data, JSON_PRETTY_PRINT | FILE_APPEND));
-$phoneNumber = trim($data['phone']); //$data['phone']; 
+$phoneNumber = trim($data['phone']);
+$emailAddress = trim($data['email']);
 
 /**
  * Поиск дубликатов контактов по телефону
  */
-function findDuplicateContacts($phone)
+function findDuplicateContacts($phone = '', $email = '')
 {
     $method = 'crm.duplicate.findbycomm';
+    $allDuplicates = [];
+    
+    // Очищаем значения
+    $phone = preg_split('/\s*,\s*/', trim($phone), -1, PREG_SPLIT_NO_EMPTY);
+    $email = preg_split('/\s*,\s*/', trim($email), -1, PREG_SPLIT_NO_EMPTY);
+    file_put_contents('debug.txt', "Ищу дубликаты по телефону: " . json_encode($phone) . " и email: " . json_encode($email) . "\n", FILE_APPEND);
+    
+    // Ищем по телефону, если он указан
+    if ($phone !== '') {
+        $params = [
+            'entity_type' => 'CONTACT',
+            'type' => 'PHONE',
+            'values' => $phone
+        ];
+        
+        $result = sendBitrixRequest($method, $params);
+        
+        if ($result && isset($result['result']['CONTACT'])) {
+            $allDuplicates = array_merge($allDuplicates, $result['result']['CONTACT']);
+        }
+    }
+    
+    // Ищем по email, если он указан
+    if ($email !== '') {
+        $params = [
+            'entity_type' => 'CONTACT',
+            'type' => 'EMAIL',
+            'values' => $email
+        ];
+        
+        $result = sendBitrixRequest($method, $params);
+        
+        if ($result && isset($result['result']['CONTACT'])) {
+            $allDuplicates = array_merge($allDuplicates, $result['result']['CONTACT']);
+        }
+    }
+    
+    // Убираем дубликаты (на случай если контакт найден и по телефону и по email)
+    $allDuplicates = array_unique($allDuplicates, SORT_REGULAR);
+    
+    file_put_contents('result.json', json_encode($allDuplicates, JSON_PRETTY_PRINT));
+    
+    return $allDuplicates;
+}
+
+/**
+ * Получение информации о нескольких контактах через batch
+ */
+function getContactsInfoBatch($contactIds)
+{
+    if (empty($contactIds)) {
+        return [];
+    }
+
+    $method = 'batch';
+    $cmd = [];
+
+    // Формируем команды для batch-запроса
+    foreach ($contactIds as $contactId) {
+        $cmd["contact_$contactId"] = "crm.contact.get?id=$contactId";
+    }
+
     $params = [
-        'entity_type' => 'CONTACT',
-        'type' => 'PHONE',
-        'values' => [$phone]
+        'halt' => 0,
+        'cmd' => $cmd
     ];
 
     $result = sendBitrixRequest($method, $params);
-    file_put_contents('result.json', json_encode($result, JSON_PRETTY_PRINT));
-    if ($result && isset($result['result']['CONTACT'])) {
-        return $result['result']['CONTACT'];
+
+    if ($result && isset($result['result']['result'])) {
+        return $result['result']['result'];
     }
 
     return [];
 }
 
 /**
- * Получение информации о контакте
+ * Обновление нескольких контактов через batch
  */
-function getContactInfo($contactId)
+function updateContactsBatch($updates)
 {
-    $method = 'crm.contact.get';
+    if (empty($updates)) {
+        return true;
+    }
+
+    $method = 'batch';
+    $cmd = [];
+
+    // Формируем команды для batch-запроса
+    foreach ($updates as $index => $update) {
+        $contactId = $update['ID'];
+        $fields = $update['FIELDS'];
+
+        // Формируем массив параметров для каждой команды
+        $cmdParams = [
+            'ID' => $contactId,
+            'FIELDS' => $fields
+        ];
+
+        // Преобразуем параметры в строку запроса
+        $queryString = http_build_query($cmdParams);
+        $cmd["update_$index"] = "crm.contact.update?$queryString";
+    }
+
     $params = [
-        'id' => $contactId
+        'halt' => 0,
+        'cmd' => $cmd
     ];
 
     $result = sendBitrixRequest($method, $params);
 
-    if ($result && isset($result['result'])) {
-        return $result['result'];
-    }
-
-    return false;
-}
-
-/**
- * Обновление контакта
- */
-function updateContact($contactId, $fields)
-{
-    $method = 'crm.contact.update';
-    $params = array_merge(['ID' => $contactId], $fields);
-
-    $result = sendBitrixRequest($method, $params);
-
-    if ($result && isset($result['result'])) {
-        return $result['result'];
+    if ($result && isset($result['result']['result'])) {
+        return $result['result']['result'];
     }
 
     return false;
@@ -96,11 +164,12 @@ function mergeContacts($contactIds, $firstvalue)
 function main()
 {
     global $phoneNumber;
+    global $emailAddress;
 
     echo "Поиск контактов по телефону: $phoneNumber\n";
 
     // 1. Находим дубликаты контактов по телефону
-    $contactIds = findDuplicateContacts($phoneNumber);
+    $contactIds = findDuplicateContacts($phoneNumber, $emailAddress);
 
     if (empty($contactIds)) {
         echo "Контакты с таким номером телефона не найдены\n";
@@ -109,100 +178,147 @@ function main()
 
     echo "Найдено контактов: " . count($contactIds) . "\n\n";
 
+    // 2. Получаем информацию о всех контактах одним batch-запросом
+    echo "Получаем информацию о всех контактах через batch...\n";
+    $contactsInfoBatch = getContactsInfoBatch($contactIds);
+
+    if (empty($contactsInfoBatch)) {
+        echo "Не удалось получить информацию о контактах\n";
+        return;
+    }
+
     $contacts = [];
-    $assignedByWithUfCrm = null;
-    $ufCrmcontactWithUfCrm = null;
-    $contactWithUfCrm = null;
-    $nameContactWithUfCrm = null;
-    $secondNameContactWithUfCrm = null;
-    $lastNameContactWithUfCrm = null;
+    $contactsWithFilledField = []; // Контакты с заполненным полем
+    $contactsWithEmptyField = [];  // Контакты с пустым полем
 
-
-    // 2. Получаем информацию о каждом контакте
+    // 3. Обрабатываем полученные данные и разделяем на группы
     foreach ($contactIds as $contactId) {
-        echo "Получаем информацию о контакте ID: $contactId\n";
+        $contactKey = "contact_$contactId";
 
-        $contactInfo = getContactInfo($contactId);
-
-        if (!$contactInfo) {
-            echo "  Не удалось получить информацию о контакте\n";
+        if (!isset($contactsInfoBatch[$contactKey])) {
+            echo "  Не удалось получить информацию о контакте ID: $contactId\n";
             continue;
         }
 
-        $assignedById = $contactInfo['ASSIGNED_BY_ID'] ?? null;
-        $ufCrm123 = $contactInfo['UF_CRM_1765885674704'] ?? null;
+        $contactInfo = $contactsInfoBatch[$contactKey];
 
+        $assignedById = $contactInfo['ASSIGNED_BY_ID'] ?? null;
+        $ufCrm123 = $contactInfo['UF_CRM_1765488342683'] ?? null;
+
+        echo "Контакт ID: $contactId\n";
         echo "  ASSIGNED_BY_ID: $assignedById\n";
-        echo "  UF_CRM_1765885674704: " . ($ufCrm123 ? $ufCrm123 : 'пусто') . "\n\n";
+        echo "  UF_CRM_1765488342683: " . ($ufCrm123 ? $ufCrm123 : 'пусто') . "\n\n";
 
         $contacts[$contactId] = [
             'ASSIGNED_BY_ID' => $assignedById,
-            'UF_CRM_1765885674704' => $ufCrm123
+            'UF_CRM_1765488342683' => $ufCrm123,
+            'NAME' => $contactInfo['NAME'],
+            'SECOND_NAME' => $contactInfo['SECOND_NAME'],
+            'LAST_NAME' => $contactInfo['LAST_NAME']
         ];
 
-        // Запоминаем контакт с заполненным UF_CRM_1765885674704
-        if (!empty($ufCrm123) && $assignedByWithUfCrm === null) {
-            $nameContactWithUfCrm = $contactInfo['NAME'];
-            $secondNameContactWithUfCrm = $contactInfo['SECOND_NAME'];
-            $lastNameContactWithUfCrm = $contactInfo['LAST_NAME'];
-            $ufCrmcontactWithUfCrm = $ufCrm123;
-            $assignedByWithUfCrm = $assignedById;
-            $contactWithUfCrm = $contactId;
-        }
-    }
-
-    // 3. Если найден контакт с заполненным UF_CRM_1765885674704
-    if ($assignedByWithUfCrm !== null) {
-        echo "Найден контакт с заполненным UF_CRM_1765885674704: ID $contactWithUfCrm\n";
-        echo "ASSIGNED_BY_ID для обновления: $assignedByWithUfCrm\n\n";
-
-        // 4. Обновляем контакты с пустым UF_CRM_1765885674704
-        $updatedCount = 0;
-        foreach ($contacts as $contactId => $contactData) {
-            if (empty($contactData['UF_CRM_1765885674704']) && $contactData['ASSIGNED_BY_ID'] != $assignedByWithUfCrm) {
-                echo "Обновляем контакт ID: $contactId\n";
-
-                $updateResult = updateContact($contactId, [
-                    'FIELDS' => [
-                        'ASSIGNED_BY_ID' => $assignedByWithUfCrm,
-                        'UF_CRM_1765885674704' => $ufCrmcontactWithUfCrm,
-                        'NAME' => $nameContactWithUfCrm,
-                        'SECOND_NAME' => $secondNameContactWithUfCrm,
-                        'LAST_NAME' => $lastNameContactWithUfCrm
-                    ]
-                ]);
-
-                if ($updateResult) {
-                    echo "  Контакт успешно обновлен\n";
-                    $updatedCount++;
-                } else {
-                    echo "  Ошибка при обновлении контакта\n";
-                }
-            }
-            if (!empty($contactData['UF_CRM_1765885674704'])) {
-                $updateResult = updateContact($contactId, [
-                    'FIELDS' => [
-                        'UF_CRM_1765887321474' => 'дубль',
-                    ]
-                ]);
-            }
-        }
-
-        echo "\nИтого обновлено контактов: $updatedCount\n";
-
-        // 5. Объединяем дубликаты
-        $mergeResult = mergeContacts($contactIds, $contactWithUfCrm);
-        file_put_contents('error.txt', "Ошибка при объединении дубликатов: " . json_encode($mergeResult) . "\n", FILE_APPEND);
-        if ($mergeResult['STATUS'] == 'SUCCESS') {
-            echo "Дубликаты успешно объединены\n";
+        // Разделяем контакты на группы
+        if (!empty($ufCrm123)) {
+            $contactsWithFilledField[] = $contactId;
         } else {
-
-            print_r($contactWithUfCrm);
+            $contactsWithEmptyField[] = $contactId;
         }
-    } else {
-        echo "Не найден ни один контакт с заполненным UF_CRM_123\n";
-        echo "Обновление не требуется\n";
     }
+
+    echo "\n=== АНАЛИЗ СИТУАЦИИ ===\n";
+    echo "Контактов с заполненным UF_CRM_1765488342683: " . count($contactsWithFilledField) . "\n";
+    echo "Контактов с пустым UF_CRM_1765488342683: " . count($contactsWithEmptyField) . "\n\n";
+
+    // 4. СЦЕНАРИЙ 1: Несколько контактов с заполненным полем = КОНФЛИКТ
+    if (count($contactsWithFilledField) > 1) {
+        echo "⚠️ ОБНАРУЖЕН КОНФЛИКТ: Найдено " . count($contactsWithFilledField) . " контактов с заполненным полем!\n";
+        echo "Все эти контакты будут помечены как 'дубль' и НЕ будут объединены.\n\n";
+
+        $updates = [];
+
+        // Помечаем ВСЕ контакты с заполненным полем как дубли
+        foreach ($contactIds as $contactId) {
+            echo "Помечаем контакт ID $contactId как 'дубль'\n";
+            $updates[] = [
+                'ID' => $contactId,
+                'FIELDS' => [
+                    'UF_CRM_1765894935249' => 'дубль'
+                ]
+            ];
+        }
+
+        // Выполняем batch-обновление
+        if (!empty($updates)) {
+            echo "\nВыполняем batch-обновление " . count($updates) . " контактов...\n";
+            $updateResult = updateContactsBatch($updates);
+
+            if ($updateResult) {
+                echo "✅ Все конфликтные контакты помечены как 'дубль'\n";
+            } else {
+                echo "❌ Ошибка при пометке контактов\n";
+            }
+        }
+
+        echo "\n⛔ ОБЪЕДИНЕНИЕ НЕ ВЫПОЛНЯЕТСЯ из-за конфликта!\n";
+        echo "Необходимо вручную разобраться с дублями.\n";
+        return;
+    }
+
+    // 5. СЦЕНАРИЙ 2: Один контакт с заполненным полем = СТАНДАРТНЫЙ СЛУЧАЙ
+    if (count($contactsWithFilledField) === 1) {
+        $contactWithUfCrm = $contactsWithFilledField[0];
+        $mainContact = $contacts[$contactWithUfCrm];
+
+        echo "✅ Найден ОСНОВНОЙ контакт с заполненным UF_CRM_1765488342683: ID $contactWithUfCrm\n";
+        echo "ASSIGNED_BY_ID для обновления: " . $mainContact['ASSIGNED_BY_ID'] . "\n\n";
+
+        $updates = [];
+
+        // Обновляем только контакты с ПУСТЫМ полем
+        foreach ($contactsWithEmptyField as $contactId) {
+            echo "Готовим обновление для контакта ID: $contactId\n";
+
+            $updates[] = [
+                'ID' => $contactId,
+                'FIELDS' => [
+                    'ASSIGNED_BY_ID' => $mainContact['ASSIGNED_BY_ID'],
+                    'UF_CRM_1765488342683' => $mainContact['UF_CRM_1765488342683'],
+                    'NAME' => $mainContact['NAME'],
+                    'SECOND_NAME' => $mainContact['SECOND_NAME'],
+                    'LAST_NAME' => $mainContact['LAST_NAME']
+                ]
+            ];
+        }
+
+        // Выполняем batch-обновление
+        if (!empty($updates)) {
+            echo "\nВыполняем batch-обновление " . count($updates) . " контактов...\n";
+            $updateResult = updateContactsBatch($updates);
+
+            if ($updateResult) {
+                echo "✅ Контакты успешно обновлены\n";
+            } else {
+                echo "❌ Ошибка при обновлении контактов\n";
+            }
+        }
+
+        // Объединяем дубликаты
+        echo "\nОбъединяем дубликаты...\n";
+        $mergeResult = mergeContacts($contactIds, $contactWithUfCrm);
+        file_put_contents('error.txt', "Результат объединения дубликатов: " . json_encode($mergeResult) . "\n", FILE_APPEND);
+
+        if (isset($mergeResult['STATUS']) && $mergeResult['STATUS'] == 'SUCCESS') {
+            echo "✅ Дубликаты успешно объединены\n";
+        } else {
+            echo "❌ Ошибка при объединении дубликатов\n";
+            print_r($mergeResult);
+        }
+        return;
+    }
+
+    // 6. СЦЕНАРИЙ 3: Нет контактов с заполненным полем
+    echo "ℹ️ Не найден ни один контакт с заполненным UF_CRM_1765488342683\n";
+    echo "Обновление и объединение не требуется\n";
 }
 
 // Запускаем скрипт
